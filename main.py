@@ -38,7 +38,8 @@ verification_sessions = {}
 
 def format_rank_vietnamese(rank_text):
     """
-    Chuyển đổi rank tiếng Anh sang tiếng Việt
+    Chuyển đổi rank tiếng Anh sang tiếng Việt với định dạng đẹp
+    Ví dụ: Gold II -> Vàng II, Platinum III -> Bạch Kim III
     """
     if not rank_text or rank_text.lower() == 'unranked':
         return "Chưa xếp hạng"
@@ -57,18 +58,29 @@ def format_rank_vietnamese(rank_text):
         'unranked': 'Chưa xếp hạng'
     }
     
-    # Tìm và thay thế
-    lower_rank = rank_text.lower()
-    for eng, vn in rank_map.items():
-        if eng in lower_rank:
-            # Thay thế từ tiếng Anh bằng tiếng Việt
-            rank_text = rank_text.lower().replace(eng, vn)
-            # Viết hoa chữ cái đầu
-            words = rank_text.split()
-            words = [w.capitalize() for w in words]
-            return ' '.join(words)
+    # Chuyển đổi số La Mã sang số thường
+    roman_to_number = {
+        'i': 'I', 'ii': 'II', 'iii': 'III', 'iv': 'IV',
+        'v': 'V', 'vi': 'VI', 'vii': 'VII', 'viii': 'VIII'
+    }
     
-    return rank_text
+    # Tách rank thành từng phần
+    words = rank_text.split()
+    converted_words = []
+    
+    for word in words:
+        word_lower = word.lower()
+        
+        # Kiểm tra nếu là tier (Iron, Gold, Platinum, etc.)
+        if word_lower in rank_map:
+            converted_words.append(rank_map[word_lower])
+        # Kiểm tra nếu là division (I, II, III, IV, etc.)
+        elif word_lower in roman_to_number:
+            converted_words.append(roman_to_number[word_lower])  # Giữ nguyên số La Mã viết hoa
+        else:
+            converted_words.append(word)
+    
+    return ' '.join(converted_words)
 
 def get_rank_emoji(rank_text):
     """
@@ -336,9 +348,9 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
         win_rate = tft_info.get('win_rate', 0)
         
         if total_games > 0:
-            stats_text = f"🎮 **{total_games}** trận\n"
-            stats_text += f"✅ **{wins}** thắng\n"
-            stats_text += f"❌ **{losses}** thua\n"
+            stats_text = f"🎮 **{format_large_number(total_games)}** trận\n"
+            stats_text += f"✅ **{format_large_number(wins)}** thắng\n"
+            stats_text += f"❌ **{format_large_number(losses)}** thua\n"
             stats_text += f"📈 **{win_rate:.1f}%** win rate"
             
             embed.add_field(
@@ -352,7 +364,7 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
         if level > 0:
             embed.add_field(
                 name="🎮 Level",
-                value=f"**{level}**",
+                value=f"**{format_large_number(level)}**",
                 inline=True
             )
     
@@ -485,9 +497,10 @@ async def confirm_ownership(ctx, riot_id: str):
         }
     }
     
-    success = db.add_player(player_data)
+    # Sửa: Đổi tên biến 'success' thành 'db_result' để tránh conflict
+    db_result = db.add_player(player_data)
     
-    if not success:
+    if not db_result:
         embed = discord.Embed(
             title="❌ Lỗi khi lưu dữ liệu",
             description="Vui lòng thử lại sau.",
@@ -622,9 +635,9 @@ async def untrack_player(ctx, riot_id: str = None):
             return
     
     # Xóa player
-    success = db.remove_player(user_id, riot_id)
+    db_result = db.remove_player(user_id, riot_id)
     
-    if success:
+    if db_result:
         embed = discord.Embed(
             title="✅ Đã dừng theo dõi",
             description=f"Không theo dõi `{riot_id}` nữa.",
@@ -693,7 +706,7 @@ async def list_my_players(ctx):
     
     embed.add_field(
         name="📈 Tổng thống kê",
-        value=f"• 🎮 Tổng trận: **{total_games}**\n"
+        value=f"• 🎮 Tổng trận: **{format_large_number(total_games)}**\n"
               f"• ✅ Win rate: **{avg_win_rate:.1f}%**\n"
               f"• 👥 Players: **{len(players)}**",
         inline=False
@@ -805,9 +818,9 @@ async def player_info(ctx, riot_id: str = None):
     
     embed.add_field(
         name="📈 Thống kê",
-        value=f"• 🎮 **{total_games}** trận\n"
-              f"• ✅ **{wins}** thắng\n"
-              f"• ❌ **{losses}** thua\n"
+        value=f"• 🎮 **{format_large_number(total_games)}** trận\n"
+              f"• ✅ **{format_large_number(wins)}** thắng\n"
+              f"• ❌ **{format_large_number(losses)}** thua\n"
               f"• 📊 **{win_rate:.1f}%** win rate",
         inline=True
     )
@@ -1075,7 +1088,7 @@ async def send_match_notification(channel, player, match_data):
         # Gửi thêm tin nhắn chúc mừng nếu top 1
         if placement == 1:
             congrats_embed = discord.Embed(
-                title="🎉 CHÚC MỪNG CHIẾN THẲNG! 🎉",
+                title="🎉 CHÚC MỪNG CHIẾN THẮNG! 🎉",
                 description=f"**{riot_id}** vừa giành TOP 1!",
                 color=0xFFD700
             )
@@ -1288,7 +1301,7 @@ async def settings_command(ctx, setting: str = None, value: str = None):
                       f"• 🤖 AI Analysis: {'✅' if settings.get('include_ai_analysis', True) else '❌'}\n"
                       f"• 🎯 Auto-notify: {'✅' if settings.get('auto_notify', True) else '❌'}",
                 inline=True
-            )
+        )
         
         await ctx.send(embed=embed)
         return
