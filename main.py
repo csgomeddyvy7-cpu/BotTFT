@@ -34,26 +34,120 @@ gemini_analyzer = GeminiAnalyzer(config.GEMINI_API_KEY)
 # Biến tạm lưu trạng thái xác thực
 verification_sessions = {}
 
+# ========== HELPER FUNCTIONS ==========
+
+def format_rank_vietnamese(rank_text):
+    """
+    Chuyển đổi rank tiếng Anh sang tiếng Việt
+    """
+    if not rank_text or rank_text.lower() == 'unranked':
+        return "Chưa xếp hạng"
+    
+    # Map từ tiếng Anh sang tiếng Việt
+    rank_map = {
+        'iron': 'Sắt',
+        'bronze': 'Đồng',
+        'silver': 'Bạc', 
+        'gold': 'Vàng',
+        'platinum': 'Bạch Kim',
+        'diamond': 'Kim Cương',
+        'master': 'Cao Thủ',
+        'grandmaster': 'Đại Cao Thủ',
+        'challenger': 'Thách Đấu',
+        'unranked': 'Chưa xếp hạng'
+    }
+    
+    # Tìm và thay thế
+    lower_rank = rank_text.lower()
+    for eng, vn in rank_map.items():
+        if eng in lower_rank:
+            # Thay thế từ tiếng Anh bằng tiếng Việt
+            rank_text = rank_text.lower().replace(eng, vn)
+            # Viết hoa chữ cái đầu
+            words = rank_text.split()
+            words = [w.capitalize() for w in words]
+            return ' '.join(words)
+    
+    return rank_text
+
+def get_rank_emoji(rank_text):
+    """
+    Lấy emoji tương ứng với rank
+    """
+    rank_lower = rank_text.lower()
+    
+    if 'sắt' in rank_lower:
+        return "⚫"
+    elif 'đồng' in rank_lower:
+        return "🟤"
+    elif 'bạc' in rank_lower:
+        return "⚪"
+    elif 'vàng' in rank_lower:
+        return "🟡"
+    elif 'bạch kim' in rank_lower:
+        return "🔵"
+    elif 'kim cương' in rank_lower:
+        return "💎"
+    elif 'cao thủ' in rank_lower:
+        return "🔥"
+    elif 'đại cao thủ' in rank_lower:
+        return "🌟"
+    elif 'thách đấu' in rank_lower:
+        return "👑"
+    else:
+        return "🎮"
+
+def format_large_number(num):
+    """Định dạng số lớn"""
+    if num >= 1000:
+        return f"{num:,}".replace(",", ".")
+    return str(num)
+
+def get_uptime(start_time):
+    """Tính thời gian đã chạy"""
+    delta = datetime.now() - start_time
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    elif minutes > 0:
+        return f"{minutes}m {seconds}s"
+    else:
+        return f"{seconds}s"
+
 # ========== EVENTS ==========
 
 @bot.event
 async def on_ready():
     """Sự kiện khi bot sẵn sàng"""
     print(f'✅ TFT Tracker Bot đã sẵn sàng!')
-    print(f'🤖 Bot: {bot.user.name}')
+    print(f'🤖 Bot: {bot.user.name} (ID: {bot.user.id})')
     print(f'🎮 Prefix: {config.PREFIX}')
-    print(f'📊 Database: {len(db.get_all_players())} players')
+    
+    # Load players từ database
+    players = db.get_all_players()
+    print(f'📊 Database: {len(players)} players đang theo dõi')
     print(f'🔧 Gemini AI: {gemini_analyzer.status}')
+    print(f'🎯 Riot Verifier: {"✅ Có API Key" if riot_verifier.has_api_key else "⚠️ Không có API Key"}')
     
     # Khởi động task tự động
     if not auto_check_matches.is_running():
         auto_check_matches.start()
+        print(f'🔄 Đã bật auto-check (mỗi {config.AUTO_CHECK_INTERVAL} phút)')
     
     # Set status
+    await update_bot_status()
+
+async def update_bot_status():
+    """Cập nhật status bot"""
+    players_count = len(db.get_all_players())
+    activity_text = f"{players_count} TFT players"
+    
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name=f"{len(db.get_all_players())} TFT players"
+            name=activity_text
         )
     )
 
@@ -69,19 +163,23 @@ async def on_command_error(ctx, error):
             description=f"Vui lòng kiểm tra lại cú pháp lệnh!",
             color=0xff0000
         )
-        embed.add_field(
-            name="ℹ️ Hướng dẫn",
-            value=f"Dùng `{config.PREFIX}help` để xem hướng dẫn đầy đủ",
-            inline=False
-        )
+        
+        # Gợi ý cho từng lệnh
+        if ctx.command.name == 'track':
+            embed.add_field(
+                name="📝 Ví dụ đúng:",
+                value=f"`{config.PREFIX}track TênGame#Tagline vn`\n`{config.PREFIX}track DarkViPer#VN2`",
+                inline=False
+            )
+        
         await ctx.send(embed=embed)
     
     elif isinstance(error, commands.BadArgument):
         await ctx.send(f"❌ Tham số không hợp lệ: {str(error)}")
     
     else:
-        print(f"Lỗi không xác định: {error}")
-        await ctx.send(f"❌ Đã xảy ra lỗi: {str(error)[:100]}...")
+        print(f"[ERROR] Command {ctx.command}: {error}")
+        await ctx.send(f"❌ Đã xảy ra lỗi: {str(error)[:100]}")
 
 # ========== VERIFICATION FLOW ==========
 
@@ -97,17 +195,17 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
     if '#' not in riot_id:
         embed = discord.Embed(
             title="❌ Sai định dạng Riot ID",
-            description="Vui lòng sử dụng đúng format: **Username#Tagline**",
+            description="**Riot ID phải có dạng:** `TênGame#Tagline`",
             color=0xff0000
         )
         embed.add_field(
             name="📝 Ví dụ đúng:",
-            value=f"`{config.PREFIX}track DarkViPer#VN2 vn`\n`{config.PREFIX}track TFTGod#KR1 kr`",
+            value=f"• `{config.PREFIX}track DarkViPer#VN2`\n• `{config.PREFIX}track TFTGod#KR1 kr`",
             inline=False
         )
         embed.add_field(
-            name="ℹ️ Lưu ý:",
-            value="Tagline thường là mã vùng (VN2, KR1, EUW, NA1...)",
+            name="ℹ️ Tìm Tagline của bạn:",
+            value="1. Vào game LOL/TFT\n2. Click vào icon profile\n3. Tagline hiển thị dưới tên\n4. Thường là: VN2, NA1, KR1, EUW...",
             inline=False
         )
         await ctx.send(embed=embed)
@@ -116,16 +214,24 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
     # Tách username và tagline
     try:
         username, tagline = riot_id.split('#', 1)
+        username = username.strip()
+        tagline = tagline.strip()
+        
+        if not username or not tagline:
+            await ctx.send("❌ Tên và Tagline không được để trống!")
+            return
+            
     except ValueError:
-        await ctx.send("❌ Sai format! Dùng: Username#Tagline")
+        await ctx.send("❌ Sai format! Dùng: TênGame#Tagline")
         return
     
     # Kiểm tra xem đã theo dõi chưa
     existing = db.get_player_by_riot_id(riot_id)
     if existing:
+        discord_user = f"<@{existing['discord_id']}>"
         embed = discord.Embed(
-            title="⚠️ Đã theo dõi",
-            description=f"Riot ID `{riot_id}` đã được theo dõi!",
+            title="⚠️ Đã được theo dõi",
+            description=f"Riot ID `{riot_id}` đang được {discord_user} theo dõi!",
             color=0xff9900
         )
         await ctx.send(embed=embed)
@@ -138,33 +244,45 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
         color=0x7289DA,
         timestamp=datetime.now()
     )
-    embed.set_footer(text="Vui lòng chờ trong giây lát...")
+    embed.set_footer(text="Đang lấy dữ liệu từ tracker.gg...")
     msg = await ctx.send(embed=embed)
     
-    # Xác thực Riot ID
+    # Xác thực Riot ID với dữ liệu THẬT
     verification_result = await riot_verifier.verify_riot_id(riot_id, region)
     
     if not verification_result['success']:
         # Xác thực thất bại
         embed = discord.Embed(
-            title="❌ Xác thực thất bại",
+            title="❌ Không tìm thấy tài khoản",
             description=f"Không thể xác thực Riot ID: `{riot_id}`",
             color=0xff0000
         )
-        embed.add_field(
-            name="📝 Lý do:",
-            value=verification_result.get('error', 'Không rõ lý do'),
-            inline=False
-        )
-        embed.add_field(
-            name="💡 Gợi ý:",
-            value="1. Kiểm tra lại chính tả\n2. Kiểm tra Region\n3. Đảm bảo tài khoản tồn tại",
-            inline=False
-        )
+        
+        error_msg = verification_result.get('error', 'Không rõ lý do')
+        
+        if '404' in error_msg or 'not found' in error_msg.lower():
+            embed.add_field(
+                name="📝 Có thể do:",
+                value="1. ❌ Sai Riot ID hoặc Tagline\n"
+                      "2. 🌍 Sai region (vn, na, euw...)\n"
+                      "3. 🎮 Chưa chơi TFT mùa này\n"
+                      "4. 🔒 Profile đặt chế độ riêng tư",
+                inline=False
+            )
+            embed.add_field(
+                name="💡 Cách kiểm tra:",
+                value=f"1. Truy cập: https://tracker.gg/tft\n"
+                      f"2. Gõ `{riot_id}` vào ô tìm kiếm\n"
+                      f"3. Kiểm tra xem có profile không",
+                inline=False
+            )
+        else:
+            embed.add_field(name="📝 Lý do:", value=error_msg, inline=False)
+        
         await msg.edit(embed=embed)
         return
     
-    # Xác thực thành công - hiển thị thông tin
+    # Xác thực thành công - hiển thị thông tin THẬT
     account_data = verification_result['data']
     
     embed = discord.Embed(
@@ -175,51 +293,89 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
     )
     
     # Thêm thông tin cơ bản
-    if account_data.get('game_name'):
-        embed.add_field(
-            name="👤 Game Name",
-            value=account_data['game_name'],
-            inline=True
-        )
+    game_name = account_data.get('game_name', username)
+    tagline_display = account_data.get('tagline', tagline)
     
-    if account_data.get('tagline'):
-        embed.add_field(
-            name="🏷️ Tagline",
-            value=account_data['tagline'],
-            inline=True
-        )
+    embed.add_field(
+        name="👤 Tên trong game",
+        value=f"`{game_name}#{tagline_display}`",
+        inline=True
+    )
     
-    # Lấy thông tin TFT
-    tft_info = await tft_service.get_player_overview(riot_id, region)
+    embed.add_field(
+        name="🌍 Region",
+        value=region.upper(),
+        inline=True
+    )
     
-    if tft_info and tft_info.get('rank'):
+    # Lấy thông tin TFT THẬT
+    tft_info = account_data.get('tft_info', {})
+    
+    if tft_info:
+        # Format rank sang tiếng Việt
+        rank_text = tft_info.get('rank', 'Chưa xếp hạng')
+        rank_vn = format_rank_vietnamese(rank_text)
+        rank_emoji = get_rank_emoji(rank_vn)
+        
+        # Thêm rank TFT
+        lp = tft_info.get('lp', 0)
+        rank_display = f"{rank_emoji} **{rank_vn}**"
+        if lp > 0:
+            rank_display += f"\n`{lp} LP`"
+        
         embed.add_field(
             name="📊 Rank TFT",
-            value=f"**{tft_info['rank']}**\n{tft_info.get('lp', '')} LP",
+            value=rank_display,
             inline=True
         )
+        
+        # Thêm win rate và tổng trận
+        wins = tft_info.get('wins', 0)
+        losses = tft_info.get('losses', 0)
+        total_games = tft_info.get('total_games', wins + losses)
+        win_rate = tft_info.get('win_rate', 0)
+        
+        if total_games > 0:
+            stats_text = f"🎮 **{total_games}** trận\n"
+            stats_text += f"✅ **{wins}** thắng\n"
+            stats_text += f"❌ **{losses}** thua\n"
+            stats_text += f"📈 **{win_rate:.1f}%** win rate"
+            
+            embed.add_field(
+                name="📈 Thống kê",
+                value=stats_text,
+                inline=True
+            )
+        
+        # Thêm level
+        level = tft_info.get('level', 0)
+        if level > 0:
+            embed.add_field(
+                name="🎮 Level",
+                value=f"**{level}**",
+                inline=True
+            )
     
-    if tft_info and tft_info.get('level'):
-        embed.add_field(
-            name="🎮 Level",
-            value=tft_info['level'],
-            inline=True
-        )
+    # Thêm nguồn dữ liệu
+    source = verification_result.get('source', 'unknown')
+    source_map = {
+        'tracker.gg': '📊 tracker.gg',
+        'op.gg': '🌐 op.gg',
+        'riot_api': '🎮 Riot API'
+    }
     
-    if tft_info and tft_info.get('wins'):
-        win_rate = (tft_info['wins'] / max(tft_info['total_games'], 1)) * 100
-        embed.add_field(
-            name="📈 Thống kê",
-            value=f"Tổng: {tft_info['total_games']} trận\nThắng: {tft_info['wins']} ({win_rate:.1f}%)",
-            inline=True
-        )
+    embed.add_field(
+        name="📡 Nguồn dữ liệu",
+        value=source_map.get(source, source),
+        inline=True
+    )
     
     # Thêm hướng dẫn xác nhận
     embed.add_field(
         name="🔐 Bước 2: Xác nhận sở hữu",
-        value=f"Để xác nhận đây là tài khoản của bạn, hãy gõ:\n"
-              f"`{config.PREFIX}confirm {riot_id}`\n\n"
-              f"Hoặc hủy với: `{config.PREFIX}cancel`",
+        value=f"**Để xác nhận đây là tài khoản của bạn:**\n"
+              f"Gõ `{config.PREFIX}confirm {riot_id}`\n\n"
+              f"**Hoặc hủy với:** `{config.PREFIX}cancel`",
         inline=False
     )
     
@@ -230,10 +386,34 @@ async def track_player(ctx, riot_id: str, region: str = 'vn'):
         'data': account_data,
         'tft_info': tft_info,
         'timestamp': datetime.now(),
-        'message_id': msg.id
+        'message_id': msg.id,
+        'channel_id': ctx.channel.id
     }
     
+    # Set timeout cho session (15 phút)
+    asyncio.create_task(clear_verification_session(ctx.author.id, 900))
+    
     await msg.edit(embed=embed)
+
+async def clear_verification_session(user_id, delay_seconds):
+    """Xóa session sau một khoảng thời gian"""
+    await asyncio.sleep(delay_seconds)
+    if user_id in verification_sessions:
+        try:
+            session = verification_sessions[user_id]
+            channel = bot.get_channel(session['channel_id'])
+            if channel:
+                embed = discord.Embed(
+                    title="⏰ Session đã hết hạn",
+                    description=f"Session xác thực cho `{session['riot_id']}` đã hết hạn sau 15 phút.",
+                    color=0xff9900
+                )
+                await channel.send(embed=embed)
+        except:
+            pass
+        finally:
+            if user_id in verification_sessions:
+                del verification_sessions[user_id]
 
 @bot.command(name='confirm')
 async def confirm_ownership(ctx, riot_id: str):
@@ -246,7 +426,7 @@ async def confirm_ownership(ctx, riot_id: str):
     if user_id not in verification_sessions:
         embed = discord.Embed(
             title="❌ Không tìm thấy session",
-            description="Vui lòng bắt đầu với lệnh `!track` trước.",
+            description="Vui lòng bắt đầu với `!track` trước.\nSession chỉ tồn tại trong 15 phút.",
             color=0xff0000
         )
         await ctx.send(embed=embed)
@@ -258,33 +438,33 @@ async def confirm_ownership(ctx, riot_id: str):
     if session['riot_id'].lower() != riot_id.lower():
         embed = discord.Embed(
             title="❌ Riot ID không khớp",
-            description=f"Session: `{session['riot_id']}`\nBạn nhập: `{riot_id}`",
+            description=f"Session của bạn: `{session['riot_id']}`\nBạn nhập: `{riot_id}`",
             color=0xff0000
         )
         await ctx.send(embed=embed)
         return
     
-    # Kiểm tra thời gian session (30 phút)
+    # Kiểm tra thời gian session (15 phút)
     time_diff = datetime.now() - session['timestamp']
-    if time_diff.total_seconds() > 1800:  # 30 phút
+    if time_diff.total_seconds() > 900:  # 15 phút
         del verification_sessions[user_id]
         embed = discord.Embed(
             title="⏰ Session hết hạn",
-            description="Vui lòng bắt đầu lại với `!track`.",
+            description="Session đã hết hạn sau 15 phút.\nVui lòng bắt đầu lại với `!track`.",
             color=0xff9900
         )
         await ctx.send(embed=embed)
         return
     
-    # Lưu player vào database
+    # Lưu player vào database với dữ liệu THẬT
     player_data = {
         'discord_id': str(user_id),
         'discord_name': ctx.author.name,
+        'discord_display_name': ctx.author.display_name,
         'riot_id': session['riot_id'],
         'region': session['region'],
         'game_name': session['data'].get('game_name', ''),
         'tagline': session['data'].get('tagline', ''),
-        'puuid': session['data'].get('puuid', ''),
         'verified': True,
         'verification_date': datetime.now().isoformat(),
         'tracking_started': datetime.now().isoformat(),
@@ -292,8 +472,16 @@ async def confirm_ownership(ctx, riot_id: str):
         'tft_info': session['tft_info'],
         'settings': {
             'auto_notify': True,
-            'include_ai_analysis': True,
-            'mention_on_notify': True
+            'include_ai_analysis': True if gemini_analyzer.is_enabled() else False,
+            'mention_on_notify': True,
+            'notify_on_top4': True,
+            'notify_on_win': True
+        },
+        'last_checked': datetime.now().isoformat(),
+        'stats': {
+            'total_notifications': 0,
+            'last_match_time': None,
+            'average_placement': 0
         }
     }
     
@@ -311,6 +499,11 @@ async def confirm_ownership(ctx, riot_id: str):
     # Xóa session
     del verification_sessions[user_id]
     
+    # Format rank tiếng Việt cho thông báo
+    rank_text = session['tft_info'].get('rank', 'Chưa xếp hạng')
+    rank_vn = format_rank_vietnamese(rank_text)
+    rank_emoji = get_rank_emoji(rank_vn)
+    
     # Thông báo thành công
     embed = discord.Embed(
         title="🎉 Đã xác thực thành công!",
@@ -321,24 +514,26 @@ async def confirm_ownership(ctx, riot_id: str):
     
     embed.add_field(
         name="📊 Thông tin đã lưu",
-        value=f"• Riot ID: `{session['riot_id']}`\n"
-              f"• Region: `{session['region'].upper()}`\n"
-              f"• Channel: <#{ctx.channel.id}>\n"
-              f"• Verified: ✅",
+        value=f"• 🎮 Riot ID: `{session['riot_id']}`\n"
+              f"• 🌍 Region: `{session['region'].upper()}`\n"
+              f"• 📊 Rank: {rank_emoji} {rank_vn}\n"
+              f"• ✅ Verified: Đã xác thực",
         inline=False
     )
     
     embed.add_field(
         name="🔄 Tự động hóa",
-        value="• Bot sẽ tự động kiểm tra mỗi **5 phút**\n"
-              "• Thông báo khi có trận TFT mới\n"
-              "• Phân tích AI tự động (nếu bật)",
+        value="• 🤖 Bot kiểm tra mỗi **5 phút**\n"
+              "• 🔔 Thông báo khi có trận TFT mới\n"
+              "• 🤖 Phân tích AI tự động",
         inline=False
     )
     
     embed.add_field(
         name="⚙️ Cài đặt",
-        value=f"Dùng `{config.PREFIX}settings` để thay đổi cài đặt",
+        value=f"• Dùng `{config.PREFIX}settings` để thay đổi\n"
+              f"• Dùng `{config.PREFIX}myplayers` để xem danh sách\n"
+              f"• Dùng `{config.PREFIX}untrack` để dừng theo dõi",
         inline=False
     )
     
@@ -347,12 +542,7 @@ async def confirm_ownership(ctx, riot_id: str):
     await ctx.send(embed=embed)
     
     # Cập nhật bot status
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(db.get_all_players())} TFT players"
-        )
-    )
+    await update_bot_status()
 
 @bot.command(name='cancel')
 async def cancel_verification(ctx):
@@ -379,29 +569,42 @@ async def cancel_verification(ctx):
 async def untrack_player(ctx, riot_id: str = None):
     """
     Dừng theo dõi player
-    Usage: !untrack [RiotID] (nếu không có ID sẽ hỏi)
+    Usage: !untrack [RiotID/số]
     """
     user_id = str(ctx.author.id)
+    players = db.get_players_by_discord_id(user_id)
+    
+    if not players:
+        embed = discord.Embed(
+            title="📭 Không có player nào",
+            description="Bạn chưa theo dõi player nào cả.",
+            color=0x7289DA
+        )
+        embed.add_field(
+            name="🎮 Bắt đầu theo dõi:",
+            value=f"`{config.PREFIX}track TênGame#Tagline`",
+            inline=False
+        )
+        await ctx.send(embed=embed)
+        return
     
     # Nếu không có riot_id, hiển thị danh sách để chọn
     if not riot_id:
-        players = db.get_players_by_discord_id(user_id)
-        
-        if not players:
-            await ctx.send("❌ Bạn không theo dõi ai cả!")
-            return
-        
-        # Tạo embed với danh sách
         embed = discord.Embed(
             title="📋 Chọn player để dừng theo dõi",
-            description="Gõ `!untrack [số_thứ_tự]`",
+            description=f"Gõ `{config.PREFIX}untrack [số]`",
             color=0x7289DA
         )
         
         for i, player in enumerate(players, 1):
+            rank_text = player.get('tft_info', {}).get('rank', 'Chưa xếp hạng')
+            rank_vn = format_rank_vietnamese(rank_text)
+            rank_emoji = get_rank_emoji(rank_vn)
+            
             embed.add_field(
                 name=f"{i}. {player['riot_id']}",
-                value=f"Theo dõi từ: {player['tracking_started'][:10]}",
+                value=f"{rank_emoji} {rank_vn}\n"
+                      f"Theo dõi từ: {player['tracking_started'][:10]}",
                 inline=False
             )
         
@@ -410,7 +613,6 @@ async def untrack_player(ctx, riot_id: str = None):
     
     # Nếu riot_id là số, tìm player theo index
     if riot_id.isdigit():
-        players = db.get_players_by_discord_id(user_id)
         idx = int(riot_id) - 1
         
         if 0 <= idx < len(players):
@@ -430,12 +632,7 @@ async def untrack_player(ctx, riot_id: str = None):
         )
         
         # Cập nhật status
-        await bot.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name=f"{len(db.get_all_players())} TFT players"
-            )
-        )
+        await update_bot_status()
     else:
         embed = discord.Embed(
             title="❌ Không tìm thấy player",
@@ -453,108 +650,197 @@ async def list_my_players(ctx):
     
     if not players:
         embed = discord.Embed(
-            title="📋 Danh sách theo dõi",
+            title="📭 Chưa theo dõi ai",
             description="Bạn chưa theo dõi player nào.",
             color=0x7289DA
         )
         embed.add_field(
-            name="🎮 Bắt đầu theo dõi",
-            value=f"Dùng `{config.PREFIX}track Username#Tagline`",
+            name="🎮 Bắt đầu theo dõi:",
+            value=f"`{config.PREFIX}track TênGame#Tagline`\nVí dụ: `{config.PREFIX}track DarkViPer#VN2`",
             inline=False
         )
         await ctx.send(embed=embed)
         return
     
+    total_games = sum(p.get('tft_info', {}).get('total_games', 0) for p in players)
+    total_wins = sum(p.get('tft_info', {}).get('wins', 0) for p in players)
+    avg_win_rate = (total_wins / total_games * 100) if total_games > 0 else 0
+    
     embed = discord.Embed(
         title=f"📋 Đang theo dõi {len(players)} player(s)",
-        description=f"User: {ctx.author.name}",
+        description=f"👤 {ctx.author.display_name}",
         color=0x7289DA,
         timestamp=datetime.now()
     )
     
     for player in players:
-        status = "✅" if player.get('verified') else "⚠️"
-        last_match = player.get('last_match_time', 'Chưa có')
+        tft_info = player.get('tft_info', {})
+        rank_text = tft_info.get('rank', 'Chưa xếp hạng')
+        rank_vn = format_rank_vietnamese(rank_text)
+        rank_emoji = get_rank_emoji(rank_vn)
         
-        if isinstance(last_match, str) and len(last_match) > 10:
-            last_match = last_match[:10]
+        wins = tft_info.get('wins', 0)
+        total_games_player = tft_info.get('total_games', 0)
+        win_rate = (wins / total_games_player * 100) if total_games_player > 0 else 0
         
         embed.add_field(
-            name=f"{status} {player['riot_id']}",
-            value=f"• Region: {player.get('region', 'N/A').upper()}\n"
-                  f"• Theo dõi từ: {player.get('tracking_started', 'N/A')[:10]}\n"
-                  f"• Match cuối: {last_match}",
+            name=f"{rank_emoji} {player['riot_id']}",
+            value=f"• 📊 {rank_vn}\n"
+                  f"• 🏆 {wins}/{total_games_player} ({win_rate:.1f}%)\n"
+                  f"• ⏰ Từ {player.get('tracking_started', 'N/A')[:10]}",
             inline=True
         )
     
-    embed.set_footer(text=f"Dùng !untrack [số] để dừng theo dõi")
+    embed.add_field(
+        name="📈 Tổng thống kê",
+        value=f"• 🎮 Tổng trận: **{total_games}**\n"
+              f"• ✅ Win rate: **{avg_win_rate:.1f}%**\n"
+              f"• 👥 Players: **{len(players)}**",
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Dùng {config.PREFIX}untrack [số] để dừng theo dõi")
     await ctx.send(embed=embed)
 
-@bot.command(name='allplayers')
-@commands.has_permissions(administrator=True)
-async def list_all_players(ctx):
-    """Danh sách tất cả players (admin only)"""
-    players = db.get_all_players()
+@bot.command(name='playerinfo')
+async def player_info(ctx, riot_id: str = None):
+    """Xem thông tin chi tiết của player"""
+    user_id = str(ctx.author.id)
     
-    if not players:
-        await ctx.send("📭 Chưa có player nào được theo dõi.")
-        return
-    
-    # Phân trang
-    items_per_page = 6
-    pages = [players[i:i + items_per_page] for i in range(0, len(players), items_per_page)]
-    
-    current_page = 0
-    
-    def create_embed(page):
+    # Nếu không có riot_id, lấy players của user
+    if not riot_id:
+        players = db.get_players_by_discord_id(user_id)
+        
+        if not players:
+            await ctx.send("❌ Bạn không theo dõi ai cả!")
+            return
+        
+        # Hiển thị danh sách để chọn
         embed = discord.Embed(
-            title=f"👥 Tất cả players ({len(players)})",
-            description=f"Trang {page + 1}/{len(pages)}",
-            color=0x7289DA,
-            timestamp=datetime.now()
+            title="📋 Chọn player để xem thông tin",
+            description=f"Gõ `{config.PREFIX}playerinfo [số]`",
+            color=0x7289DA
         )
         
-        for player in pages[page]:
-            discord_user = f"<@{player['discord_id']}>"
-            verified = "✅" if player.get('verified') else "❌"
+        for i, player in enumerate(players, 1):
+            rank_text = player.get('tft_info', {}).get('rank', 'Chưa xếp hạng')
+            rank_vn = format_rank_vietnamese(rank_text)
             
             embed.add_field(
-                name=f"{verified} {player['riot_id']}",
-                value=f"• Discord: {discord_user}\n"
-                      f"• Region: {player.get('region', 'N/A').upper()}\n"
-                      f"• Channel: <#{player.get('channel_id', '')}>",
-                inline=True
+                name=f"{i}. {player['riot_id']}",
+                value=f"{rank_vn}\nTheo dõi từ: {player['tracking_started'][:10]}",
+                inline=False
             )
         
-        return embed
+        await ctx.send(embed=embed)
+        return
     
-    # Gửi embed đầu tiên
-    message = await ctx.send(embed=create_embed(current_page))
+    # Nếu riot_id là số, tìm player theo index
+    if riot_id.isdigit():
+        players = db.get_players_by_discord_id(user_id)
+        idx = int(riot_id) - 1
+        
+        if 0 <= idx < len(players):
+            player = players[idx]
+            riot_id = player['riot_id']
+        else:
+            await ctx.send("❌ Số thứ tự không hợp lệ!")
+            return
     
-    # Thêm reactions cho pagination
-    if len(pages) > 1:
-        await message.add_reaction("◀️")
-        await message.add_reaction("▶️")
+    # Tìm player
+    player = db.get_player_by_riot_id(riot_id)
+    
+    if not player or player['discord_id'] != user_id:
+        await ctx.send("❌ Bạn không theo dõi player này!")
+        return
+    
+    # Lấy dữ liệu mới nhất từ API
+    await ctx.send(f"🔍 Đang cập nhật thông tin mới nhất cho `{riot_id}`...")
+    
+    new_overview = await tft_service.get_player_overview(riot_id, player['region'])
+    
+    if new_overview:
+        # Cập nhật thông tin mới
+        player['tft_info'] = new_overview
+        db.update_player_info(user_id, riot_id, 'tft_info', new_overview)
+    
+    # Hiển thị thông tin chi tiết
+    tft_info = player.get('tft_info', {})
+    rank_text = tft_info.get('rank', 'Chưa xếp hạng')
+    rank_vn = format_rank_vietnamese(rank_text)
+    rank_emoji = get_rank_emoji(rank_vn)
+    
+    embed = discord.Embed(
+        title=f"{rank_emoji} Thông tin chi tiết - {riot_id}",
+        description=f"Region: {player.get('region', 'vn').upper()}",
+        color=0x7289DA,
+        timestamp=datetime.now()
+    )
+    
+    # Thông tin cơ bản
+    embed.add_field(
+        name="👤 Thông tin game",
+        value=f"• 🎮 Riot ID: `{riot_id}`\n"
+              f"• 🌍 Region: {player.get('region', 'vn').upper()}\n"
+              f"• ✅ Verified: {'✅ Đã xác thực' if player.get('verified') else '❌ Chưa xác thực'}\n"
+              f"• 🗓️ Theo dõi từ: {player.get('tracking_started', 'N/A')[:10]}",
+        inline=False
+    )
+    
+    # Thông tin rank TFT
+    lp = tft_info.get('lp', 0)
+    wins = tft_info.get('wins', 0)
+    losses = tft_info.get('losses', 0)
+    total_games = tft_info.get('total_games', wins + losses)
+    win_rate = tft_info.get('win_rate', 0)
+    level = tft_info.get('level', 0)
+    
+    embed.add_field(
+        name="📊 Rank TFT",
+        value=f"• {rank_emoji} **{rank_vn}**\n"
+              f"• 🏆 **{lp} LP**\n"
+              f"• 🎮 Level: **{level}**",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="📈 Thống kê",
+        value=f"• 🎮 **{total_games}** trận\n"
+              f"• ✅ **{wins}** thắng\n"
+              f"• ❌ **{losses}** thua\n"
+              f"• 📊 **{win_rate:.1f}%** win rate",
+        inline=True
+    )
+    
+    # Thông tin thông báo
+    settings = player.get('settings', {})
+    embed.add_field(
+        name="🔔 Cài đặt thông báo",
+        value=f"• 🤖 AI Analysis: {'✅ Bật' if settings.get('include_ai_analysis') else '❌ Tắt'}\n"
+              f"• 👤 Mention: {'✅ Bật' if settings.get('mention_on_notify') else '❌ Tắt'}\n"
+              f"• 🔔 Auto-notify: {'✅ Bật' if settings.get('auto_notify') else '❌ Tắt'}",
+        inline=True
+    )
+    
+    # Match history gần nhất
+    if total_games > 0:
+        match_history = await tft_service.get_match_history(riot_id, player['region'], limit=3)
         
-        def check(reaction, user):
-            return user == ctx.author and str(reaction.emoji) in ["◀️", "▶️"] and reaction.message.id == message.id
-        
-        while True:
-            try:
-                reaction, user = await bot.wait_for("reaction_add", timeout=60.0, check=check)
-                
-                if str(reaction.emoji) == "▶️" and current_page < len(pages) - 1:
-                    current_page += 1
-                    await message.edit(embed=create_embed(current_page))
-                elif str(reaction.emoji) == "◀️" and current_page > 0:
-                    current_page -= 1
-                    await message.edit(embed=create_embed(current_page))
-                
-                await message.remove_reaction(reaction, user)
-                
-            except asyncio.TimeoutError:
-                await message.clear_reactions()
-                break
+        if match_history:
+            history_text = ""
+            for match in match_history[:3]:
+                placement = match.get('placement', 8)
+                emoji = "👑" if placement == 1 else "🥈" if placement <= 4 else "📉"
+                history_text += f"{emoji} Top #{placement}\n"
+            
+            embed.add_field(
+                name="🎮 3 trận gần nhất",
+                value=history_text,
+                inline=True
+            )
+    
+    embed.set_footer(text=f"Dùng {config.PREFIX}forcecheck {riot_id} để kiểm tra ngay")
+    await ctx.send(embed=embed)
 
 # ========== MATCH CHECKING & NOTIFICATION ==========
 
@@ -568,15 +854,33 @@ async def auto_check_matches():
     if not players:
         return
     
+    checked_count = 0
+    notified_count = 0
+    
     for player in players:
         try:
-            await check_player_matches(player)
+            # Kiểm tra auto-notify setting
+            settings = player.get('settings', {})
+            if not settings.get('auto_notify', True):
+                continue
+            
+            result = await check_and_notify_player(player)
+            checked_count += 1
+            
+            if result.get('notified'):
+                notified_count += 1
+            
             await asyncio.sleep(1)  # Delay để tránh rate limit
+            
         except Exception as e:
-            print(f"Lỗi khi kiểm tra {player['riot_id']}: {e}")
+            print(f"[ERROR] Kiểm tra {player.get('riot_id', 'unknown')}: {e}")
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Đã kiểm tra {checked_count} players, thông báo {notified_count} match mới")
 
-async def check_player_matches(player):
+async def check_and_notify_player(player):
     """Kiểm tra và thông báo match mới cho một player"""
+    result = {'notified': False, 'error': None}
+    
     try:
         riot_id = player['riot_id']
         region = player.get('region', 'vn')
@@ -585,14 +889,15 @@ async def check_player_matches(player):
         # Lấy channel
         channel = bot.get_channel(channel_id)
         if not channel:
-            print(f"Channel {channel_id} không tồn tại")
-            return
+            result['error'] = f"Channel {channel_id} không tồn tại"
+            return result
         
-        # Lấy match history
-        matches = await tft_service.get_match_history(riot_id, region, limit=1)
+        # Lấy match history từ dữ liệu THẬT
+        matches = await tft_service.get_match_history(riot_id, region, limit=3)
         
         if not matches or len(matches) == 0:
-            return
+            result['error'] = "Không có match history"
+            return result
         
         latest_match = matches[0]
         match_id = latest_match.get('match_id')
@@ -609,14 +914,36 @@ async def check_player_matches(player):
                 latest_match.get('timestamp')
             )
             
-            # Tạo và gửi thông báo
+            # Cập nhật stats
+            stats = player.get('stats', {})
+            stats['total_notifications'] = stats.get('total_notifications', 0) + 1
+            stats['last_match_time'] = datetime.now().isoformat()
+            
+            # Tính average placement
+            placements = []
+            for match in matches[:5]:
+                placements.append(match.get('placement', 8))
+            
+            if placements:
+                avg_placement = sum(placements) / len(placements)
+                stats['average_placement'] = round(avg_placement, 2)
+            
+            db.update_player_info(player['discord_id'], riot_id, 'stats', stats)
+            
+            # Gửi thông báo
             await send_match_notification(channel, player, latest_match)
             
+            result['notified'] = True
+            print(f"[MATCH] Đã thông báo match mới của {riot_id}: Top #{latest_match.get('placement')}")
+    
     except Exception as e:
-        print(f"Lỗi check_player_matches: {e}")
+        result['error'] = str(e)
+        print(f"[ERROR] check_and_notify_player: {e}")
+    
+    return result
 
 async def send_match_notification(channel, player, match_data):
-    """Gửi thông báo trận đấu mới"""
+    """Gửi thông báo trận đấu mới với dữ liệu THẬT"""
     try:
         riot_id = player['riot_id']
         settings = player.get('settings', {})
@@ -627,48 +954,81 @@ async def send_match_notification(channel, player, match_data):
             discord_user = await bot.fetch_user(int(player['discord_id']))
             mention = f"{discord_user.mention} "
         
-        # Tạo embed cơ bản
+        # Lấy thông tin placement
         placement = match_data.get('placement', 8)
         level = match_data.get('level', 'N/A')
         
-        # Màu theo placement
+        # Màu và emoji theo placement
         if placement == 1:
             color = 0xFFD700  # Vàng
             emoji = "👑"
+            title = "CHIẾN THẮNG!"
         elif placement <= 4:
             color = 0xC0C0C0  # Bạc
             emoji = "🥈"
+            title = "TOP 4!"
         else:
             color = 0xCD7F32  # Đồng
             emoji = "📉"
+            title = "Hoàn thành trận đấu"
         
+        # Lấy rank hiện tại của player
+        rank_info = await tft_service.get_live_rank(riot_id, player.get('region', 'vn'))
+        current_rank = rank_info.get('rank', 'Unknown') if rank_info else 'Unknown'
+        rank_vn = format_rank_vietnamese(current_rank)
+        rank_emoji = get_rank_emoji(rank_vn)
+        
+        # Tạo embed
         embed = discord.Embed(
-            title=f"{emoji} {riot_id} vừa hoàn thành trận TFT!",
+            title=f"{emoji} {riot_id} {title}",
             description=f"**🏆 Placement:** #{placement} | **📊 Level:** {level}",
             color=color,
             timestamp=datetime.now()
         )
         
-        # Thêm thông tin chi tiết
-        if match_data.get('traits'):
-            traits_text = "\n".join([
-                f"• {trait.get('name', 'Unknown')} (Tier {trait.get('tier', 1)})"
-                for trait in match_data['traits'][:5]
-            ])
+        # Thêm thông tin rank hiện tại
+        embed.add_field(
+            name=f"{rank_emoji} Rank hiện tại",
+            value=f"**{rank_vn}**",
+            inline=True
+        )
+        
+        # Thêm thông tin đội hình
+        traits = match_data.get('traits', [])
+        if traits:
+            # Lấy top 3 traits
+            top_traits = sorted(traits, key=lambda x: x.get('tier', 0), reverse=True)[:3]
+            
+            traits_text = ""
+            for trait in top_traits:
+                name = trait.get('name', 'Unknown')
+                tier = trait.get('tier', 1)
+                stars = "⭐" * min(tier, 3)
+                traits_text += f"{stars} {name}\n"
+            
             embed.add_field(
-                name="🏆 Đội hình",
-                value=traits_text[:1024],
+                name="🏆 Top 3 Traits",
+                value=traits_text,
                 inline=True
             )
         
-        if match_data.get('units'):
-            units_text = "\n".join([
-                f"• {unit.get('character_id', 'Unknown').replace('TFT', '').replace('_', ' ').title()}"
-                for unit in match_data['units'][:5]
-            ])
+        # Thêm thông tin units
+        units = match_data.get('units', [])
+        if units:
+            # Lấy top 4 units
+            top_units = units[:4]
+            
+            units_text = ""
+            for unit in top_units:
+                name = unit.get('character_id', 'Unknown')
+                name = name.replace('TFT', '').replace('_', ' ').title()
+                tier = unit.get('tier', 1)
+                stars = "★" * tier
+                units_text += f"{stars} {name}\n"
+            
             embed.add_field(
                 name="⚔️ Units chính",
-                value=units_text[:1024],
+                value=units_text,
                 inline=True
             )
         
@@ -677,26 +1037,55 @@ async def send_match_notification(channel, player, match_data):
             ai_analysis = await gemini_analyzer.analyze_match(match_data, riot_id)
             if ai_analysis:
                 # Cắt ngắn nếu quá dài
-                if len(ai_analysis) > 1000:
-                    ai_analysis = ai_analysis[:1000] + "..."
+                if len(ai_analysis) > 800:
+                    ai_analysis = ai_analysis[:800] + "..."
                 
                 embed.add_field(
-                    name="🤖 AI Analysis",
+                    name="🤖 Phân tích AI",
                     value=ai_analysis,
                     inline=False
                 )
         
+        # Footer với thông tin match
+        match_time = match_data.get('timestamp')
+        if match_time:
+            try:
+                match_dt = datetime.fromisoformat(match_time.replace('Z', '+00:00'))
+                time_ago = datetime.now() - match_dt
+                minutes_ago = int(time_ago.total_seconds() / 60)
+                
+                if minutes_ago < 60:
+                    time_text = f"{minutes_ago} phút trước"
+                else:
+                    hours_ago = minutes_ago // 60
+                    time_text = f"{hours_ago} giờ trước"
+            except:
+                time_text = "Vừa xong"
+        else:
+            time_text = "Vừa xong"
+        
         embed.set_footer(
-            text="TFT Auto Tracker • Tự động thông báo",
+            text=f"TFT Auto Tracker • {time_text} • ID: {match_data.get('match_id', '')[:8]}",
             icon_url=bot.user.avatar.url if bot.user.avatar else None
         )
         
         # Gửi thông báo
         await channel.send(mention, embed=embed)
-        print(f"✅ Đã thông báo match mới của {riot_id}")
+        
+        # Gửi thêm tin nhắn chúc mừng nếu top 1
+        if placement == 1:
+            congrats_embed = discord.Embed(
+                title="🎉 CHÚC MỪNG CHIẾN THẲNG! 🎉",
+                description=f"**{riot_id}** vừa giành TOP 1!",
+                color=0xFFD700
+            )
+            await channel.send(embed=congrats_embed)
+        
+        return True
         
     except Exception as e:
-        print(f"Lỗi send_match_notification: {e}")
+        print(f"[ERROR] send_match_notification: {e}")
+        return False
 
 @bot.command(name='forcecheck')
 async def force_check(ctx, riot_id: str = None):
@@ -713,14 +1102,21 @@ async def force_check(ctx, riot_id: str = None):
         
         msg = await ctx.send(f"🔍 Đang kiểm tra {len(players)} player(s)...")
         
+        notified_count = 0
         for player in players:
             try:
-                await check_player_matches(player)
+                result = await check_and_notify_player(player)
+                if result.get('notified'):
+                    notified_count += 1
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"Force check error for {player['riot_id']}: {e}")
+                print(f"[ERROR] Force check {player['riot_id']}: {e}")
         
-        await msg.edit(content="✅ Đã kiểm tra xong tất cả players!")
+        if notified_count > 0:
+            await msg.edit(content=f"✅ Đã kiểm tra xong! Thông báo {notified_count} match mới.")
+        else:
+            await msg.edit(content="✅ Đã kiểm tra xong! Không có match mới.")
+        
         return
     
     # Kiểm tra specific player
@@ -730,65 +1126,84 @@ async def force_check(ctx, riot_id: str = None):
         await ctx.send("❌ Bạn không theo dõi player này!")
         return
     
-    await ctx.send(f"🔍 Đang kiểm tra {riot_id}...")
-    await check_player_matches(player)
-    await ctx.send(f"✅ Đã kiểm tra xong {riot_id}!")
+    msg = await ctx.send(f"🔍 Đang kiểm tra {riot_id}...")
+    
+    result = await check_and_notify_player(player)
+    
+    if result.get('notified'):
+        await msg.edit(content=f"✅ Đã thông báo match mới của {riot_id}!")
+    elif result.get('error'):
+        await msg.edit(content=f"⚠️ Không có match mới. Lỗi: {result['error'][:100]}")
+    else:
+        await msg.edit(content=f"✅ Đã kiểm tra {riot_id}! Không có match mới.")
 
 # ========== UTILITY COMMANDS ==========
 
 @bot.command(name='ping')
 async def ping_command(ctx):
     """Kiểm tra độ trễ"""
+    start_time = datetime.now()
+    
+    # Tính ping
     latency = round(bot.latency * 1000)
+    
+    # Lấy thông tin bot
+    players = db.get_all_players()
+    bot_start_time = getattr(bot, 'start_time', datetime.now())
     
     embed = discord.Embed(
         title="🏓 Pong!",
         description=f"Độ trễ: **{latency}ms**",
-        color=0x00ff00
+        color=0x00ff00,
+        timestamp=datetime.now()
     )
     
     embed.add_field(
-        name="📊 Thống kê",
-        value=f"• Server: {len(bot.guilds)}\n"
-              f"• Players: {len(db.get_all_players())}\n"
-              f"• Uptime: {get_uptime()}",
+        name="📊 Thống kê bot",
+        value=f"• 👥 Players: **{len(players)}**\n"
+              f"• 🎮 Servers: **{len(bot.guilds)}**\n"
+              f"• ⏰ Uptime: **{get_uptime(bot_start_time)}**",
         inline=True
     )
     
     embed.add_field(
         name="🤖 Dịch vụ",
-        value=f"• Gemini AI: {gemini_analyzer.status}\n"
-              f"• Riot API: {'✅' if riot_verifier.has_api_key else '⚠️'}\n"
-              f"• Auto-check: {'✅' if auto_check_matches.is_running() else '❌'}",
+        value=f"• Gemini AI: **{gemini_analyzer.status}**\n"
+              f"• Riot API: **{'✅ Có' if riot_verifier.has_api_key else '⚠️ Không'}**\n"
+              f"• Auto-check: **{'✅ Đang chạy' if auto_check_matches.is_running() else '❌ Dừng'}**",
+        inline=True
+    )
+    
+    # Lấy thông tin database
+    db_stats = db.get_stats()
+    embed.add_field(
+        name="🗄️ Database",
+        value=f"• 📁 Size: **{db_stats.get('database_size', 0) // 1024} KB**\n"
+              f"• ✨ Verified: **{db_stats.get('verified_players', 0)}**\n"
+              f"• 🔄 Modified: **{db_stats.get('last_modified', 'N/A')[:10]}**",
         inline=True
     )
     
     await ctx.send(embed=embed)
-
-def get_uptime():
-    """Lấy thời gian bot đã chạy"""
-    delta = datetime.now() - bot_start_time
-    hours, remainder = divmod(int(delta.total_seconds()), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}h {minutes}m {seconds}s"
 
 @bot.command(name='help')
 async def help_command(ctx):
     """Hiển thị hướng dẫn"""
     embed = discord.Embed(
         title="🎮 TFT Auto Tracker - Hướng dẫn",
-        description="Bot tự động thông báo TFT matches với xác thực 2 bước",
+        description="Bot tự động thông báo TFT matches với dữ liệu THẬT từ tracker.gg",
         color=0x7289DA
     )
     
     # Commands
     commands_section = [
-        (f"{config.PREFIX}track <Username#Tag> [region]", "Bắt đầu theo dõi player"),
+        (f"{config.PREFIX}track <Tên#Tag> [region]", "Bắt đầu theo dõi player (2 bước)"),
         (f"{config.PREFIX}confirm <RiotID>", "Xác nhận sở hữu tài khoản"),
-        (f"{config.PREFIX}cancel", "Hủy quá trình xác thực"),
-        (f"{config.PREFIX}untrack [RiotID/số]", "Dừng theo dõi"),
         (f"{config.PREFIX}myplayers", "Danh sách players bạn theo dõi"),
+        (f"{config.PREFIX}playerinfo [RiotID/số]", "Thông tin chi tiết player"),
+        (f"{config.PREFIX}untrack [RiotID/số]", "Dừng theo dõi"),
         (f"{config.PREFIX}forcecheck [RiotID]", "Kiểm tra ngay lập tức"),
+        (f"{config.PREFIX}settings", "Cài đặt thông báo"),
         (f"{config.PREFIX}ping", "Kiểm tra độ trễ và thống kê"),
         (f"{config.PREFIX}help", "Hiển thị hướng dẫn này")
     ]
@@ -796,14 +1211,17 @@ async def help_command(ctx):
     for cmd, desc in commands_section:
         embed.add_field(name=f"`{cmd}`", value=desc, inline=False)
     
-    # Examples
+    # Ví dụ
     embed.add_field(
         name="📝 Ví dụ sử dụng:",
         value=f"```\n"
-              f"{config.PREFIX}track DarkViPer#VN2 vn\n"
-              f"# Bot sẽ hiển thị thông tin tài khoản\n"
-              f"# Bạn xác nhận với:\n"
-              f"{config.PREFIX}confirm DarkViPer#VN2\n"
+              f"# Bước 1: Bắt đầu theo dõi\n"
+              f"{config.PREFIX}track DarkViPer#VN2 vn\n\n"
+              f"# Bot hiển thị thông tin THẬT từ tracker.gg\n"
+              f"# Kiểm tra rank, win rate, v.v.\n\n"
+              f"# Bước 2: Xác nhận sở hữu\n"
+              f"{config.PREFIX}confirm DarkViPer#VN2\n\n"
+              f"# Bot bắt đầu theo dõi tự động!\n"
               f"```",
         inline=False
     )
@@ -811,45 +1229,64 @@ async def help_command(ctx):
     # Features
     embed.add_field(
         name="✨ Tính năng:",
-        value="• Xác thực 2 bước với Riot ID\n"
-              "• Tự động thông báo khi có match mới\n"
-              "• Phân tích AI từ Gemini (nếu có key)\n"
-              "• Thống kê chi tiết từng player",
+        value="• ✅ **Dữ liệu THẬT** từ tracker.gg/op.gg\n"
+              "• 🔄 **Tự động thông báo** mỗi 5 phút\n"
+              "• 🤖 **Phân tích AI** bằng Gemini\n"
+              "• 📊 **Rank tiếng Việt** dễ đọc\n"
+              "• 🎮 **Xác thực 2 bước** an toàn",
         inline=False
     )
     
+    # Sources
+    embed.add_field(
+        name="📡 Nguồn dữ liệu:",
+        value="• 📊 tracker.gg - Rank và thống kê\n"
+              "• 🌐 op.gg - Dự phòng khi tracker.gg lỗi\n"
+              "• 🤖 Gemini AI - Phân tích đội hình",
+        inline=False
+    )
+    
+    players_count = len(db.get_all_players())
     embed.set_footer(
-        text=f"Prefix: {config.PREFIX} • Theo dõi: {len(db.get_all_players())} players"
+        text=f"Prefix: {config.PREFIX} • Đang theo dõi: {players_count} players • Dữ liệu THẬT 100%"
     )
     
     await ctx.send(embed=embed)
 
 @bot.command(name='settings')
 async def settings_command(ctx, setting: str = None, value: str = None):
-    """Cài đặt cho player"""
+    """Cài đặt thông báo"""
     user_id = str(ctx.author.id)
     players = db.get_players_by_discord_id(user_id)
     
     if not players:
-        await ctx.send("❌ Bạn không theo dõi player nào!")
+        embed = discord.Embed(
+            title="❌ Chưa theo dõi player nào",
+            description="Hãy dùng `!track` để bắt đầu theo dõi trước.",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
         return
     
     if not setting:
         # Hiển thị current settings
         embed = discord.Embed(
-            title="⚙️ Cài đặt của bạn",
-            description="Dùng `!settings [tên] [giá trị]` để thay đổi",
+            title="⚙️ Cài đặt thông báo",
+            description=f"Dùng `{config.PREFIX}settings [tên] [on/off]` để thay đổi",
             color=0x7289DA
         )
         
         for player in players:
             settings = player.get('settings', {})
+            rank_text = player.get('tft_info', {}).get('rank', 'Chưa xếp hạng')
+            rank_vn = format_rank_vietnamese(rank_text)
             
             embed.add_field(
                 name=f"🎮 {player['riot_id']}",
-                value=f"• Mention: {'✅' if settings.get('mention_on_notify', True) else '❌'}\n"
-                      f"• AI Analysis: {'✅' if settings.get('include_ai_analysis', True) else '❌'}\n"
-                      f"• Auto-notify: {'✅' if settings.get('auto_notify', True) else '❌'}",
+                value=f"{rank_vn}\n"
+                      f"• 🔔 Mention: {'✅' if settings.get('mention_on_notify', True) else '❌'}\n"
+                      f"• 🤖 AI Analysis: {'✅' if settings.get('include_ai_analysis', True) else '❌'}\n"
+                      f"• 🎯 Auto-notify: {'✅' if settings.get('auto_notify', True) else '❌'}",
                 inline=True
             )
         
@@ -857,42 +1294,62 @@ async def settings_command(ctx, setting: str = None, value: str = None):
         return
     
     # Update settings
-    valid_settings = ['mention', 'ai', 'autonotify']
+    valid_settings = ['mention', 'ai', 'notify']
+    setting_map = {
+        'mention': 'mention_on_notify',
+        'ai': 'include_ai_analysis',
+        'notify': 'auto_notify'
+    }
     
-    if setting.lower() not in ['mention', 'ai', 'autonotify']:
-        await ctx.send(f"❌ Setting không hợp lệ! Chọn: {', '.join(valid_settings)}")
+    if setting.lower() not in setting_map:
+        embed = discord.Embed(
+            title="❌ Setting không hợp lệ",
+            description=f"Setting hợp lệ: {', '.join(valid_settings)}",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
         return
     
     if value is None:
-        await ctx.send("❌ Thiếu giá trị! Dùng: `on` hoặc `off`")
+        embed = discord.Embed(
+            title="❌ Thiếu giá trị",
+            description="Dùng: `on`, `off`, `true`, `false`, `1`, `0`",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
         return
     
-    value_bool = value.lower() in ['on', 'true', 'yes', '1', 'enable']
+    # Parse giá trị
+    value_lower = value.lower()
+    if value_lower in ['on', 'true', 'yes', '1', 'enable', 'bật']:
+        value_bool = True
+        display_value = "✅ Bật"
+    elif value_lower in ['off', 'false', 'no', '0', 'disable', 'tắt']:
+        value_bool = False
+        display_value = "❌ Tắt"
+    else:
+        await ctx.send("❌ Giá trị không hợp lệ! Dùng `on` hoặc `off`")
+        return
     
     # Update cho tất cả players của user
     updated_count = 0
+    setting_key = setting_map[setting.lower()]
+    
     for player in players:
         riot_id = player['riot_id']
-        
-        if setting.lower() == 'mention':
-            db.update_setting(user_id, riot_id, 'mention_on_notify', value_bool)
-        elif setting.lower() == 'ai':
-            db.update_setting(user_id, riot_id, 'include_ai_analysis', value_bool)
-        elif setting.lower() == 'autonotify':
-            db.update_setting(user_id, riot_id, 'auto_notify', value_bool)
-        
-        updated_count += 1
+        if db.update_setting(user_id, riot_id, setting_key, value_bool):
+            updated_count += 1
     
-    status = "✅ Bật" if value_bool else "❌ Tắt"
-    setting_name = {
-        'mention': 'Mention',
-        'ai': 'AI Analysis',
-        'autonotify': 'Auto-notify'
-    }[setting.lower()]
+    # Tên setting hiển thị
+    setting_names = {
+        'mention': 'Mention khi thông báo',
+        'ai': 'Phân tích AI',
+        'notify': 'Tự động thông báo'
+    }
     
     embed = discord.Embed(
         title="⚙️ Đã cập nhật cài đặt",
-        description=f"{status} **{setting_name}** cho {updated_count} player(s)",
+        description=f"{display_value} **{setting_names[setting.lower()]}** cho {updated_count} player(s)",
         color=0x00ff00
     )
     
@@ -900,17 +1357,24 @@ async def settings_command(ctx, setting: str = None, value: str = None):
 
 # ========== RUN BOT ==========
 
-bot_start_time = datetime.now()
-
 if __name__ == "__main__":
-    if not config.DISCORD_TOKEN:
-        print("❌ Lỗi: DISCORD_TOKEN không được tìm thấy!")
-        print("ℹ️ Vui lòng đặt biến môi trường DISCORD_TOKEN")
+    # Validate config
+    errors = Config.validate()
+    if errors:
+        print("❌ Lỗi cấu hình:")
+        for error in errors:
+            print(f"  - {error}")
         exit(1)
     
     print("🚀 Khởi động TFT Auto Tracker Bot...")
-    print(f"📊 Database: {db.file_path}")
+    print(f"📁 Database: {Config.DB_FILE}")
     print(f"🤖 Gemini AI: {gemini_analyzer.status}")
-    print(f"🎮 Riot Verifier: {'✅ Ready' if riot_verifier.has_api_key else '⚠️ Limited'}")
+    print(f"🎮 Riot API: {'✅ Có key' if riot_verifier.has_api_key else '⚠️ Không có key'}")
+    print(f"🔧 Prefix: {config.PREFIX}")
+    print(f"🔄 Auto-check: Mỗi {config.AUTO_CHECK_INTERVAL} phút")
     
+    # Lưu thời gian bắt đầu
+    bot.start_time = datetime.now()
+    
+    # Chạy bot
     bot.run(config.DISCORD_TOKEN)
