@@ -1,19 +1,16 @@
 services:
   - type: web
-    name: tft-tracker-bot
+    name: tft-auto-tracker
     env: python
+    region: singapore  # Chọn region gần Việt Nam
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: DISCORD_BOT_TOKEN
         sync: false
-      - key: RIOT_API_KEY
-        sync: false
-        optional: true
-      - key: GEMINI_API_KEY
-        sync: false
-        optional: true
+      - key: PORT
+        value: "8080"
       - key: BOT_PREFIX
         value: "!"
-      - key: AUTO_CHECK_INTERVAL
-        value: "5"
+    healthCheckPath: /health
+    autoDeploy: true
