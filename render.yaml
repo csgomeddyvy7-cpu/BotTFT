@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: tft-auto-tracker
+    name: tft-tracker-bot
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
@@ -10,3 +10,10 @@ services:
       - key: RIOT_API_KEY
         sync: false
         optional: true
+      - key: GEMINI_API_KEY
+        sync: false
+        optional: true
+      - key: BOT_PREFIX
+        value: "!"
+      - key: AUTO_CHECK_INTERVAL
+        value: "5"
