@@ -15,5 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
+# Tạo thư mục backups
+RUN mkdir -p backups
+
 # Chạy bot
 CMD ["python", "main.py"]
