@@ -15,8 +15,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
-# Tạo thư mục backups
-RUN mkdir -p backups
+# Tạo thư mục backup
+RUN mkdir -p backup
+
+# Mở port cho web server (Render yêu cầu)
+EXPOSE 8080
 
 # Chạy bot
 CMD ["python", "main.py"]
