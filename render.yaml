@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tft-auto-tracker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: RIOT_API_KEY
+        sync: false
+        optional: true
