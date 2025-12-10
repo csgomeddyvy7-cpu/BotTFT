@@ -2,19 +2,16 @@ import aiohttp
 import asyncio
 from datetime import datetime
 import re
+import json
+from urllib.parse import quote
 
 class RiotVerifier:
-    """Xác thực Riot ID và lấy thông tin account"""
+    """Xác thực Riot ID và lấy thông tin THẬT từ tracker.gg"""
     
     def __init__(self, api_key=None):
         self.api_key = api_key
         self.has_api_key = bool(api_key)
         self.session = None
-        self.base_urls = {
-            'asia': 'https://asia.api.riotgames.com',
-            'americas': 'https://americas.api.riotgames.com',
-            'europe': 'https://europe.api.riotgames.com'
-        }
     
     async def get_session(self):
         """Lấy aiohttp session"""
@@ -27,255 +24,342 @@ class RiotVerifier:
         if self.session and not self.session.closed:
             await self.session.close()
     
-    def get_region_endpoint(self, region):
-        """Lấy endpoint theo region"""
-        region_map = {
-            'vn': 'asia',
-            'kr': 'asia',
-            'jp': 'asia',
-            'na': 'americas',
-            'br': 'americas',
-            'lan': 'americas',
-            'las': 'americas',
-            'oce': 'americas',
-            'euw': 'europe',
-            'eune': 'europe',
-            'tr': 'europe',
-            'ru': 'europe'
-        }
-        return self.base_urls.get(region_map.get(region.lower(), 'asia'))
-    
     async def verify_riot_id(self, riot_id, region='vn'):
         """
-        Xác thực Riot ID
-        Returns: {
-            'success': bool,
-            'data': dict (thông tin account),
-            'error': str (nếu có)
-        }
+        Xác thực Riot ID với dữ liệu THẬT từ tracker.gg
         """
-        # Kiểm tra format
         if '#' not in riot_id:
             return {
                 'success': False,
                 'error': 'Sai format! Dùng: Username#Tagline'
             }
         
-        # Tách username và tagline
         try:
             username, tagline = riot_id.split('#', 1)
-        except ValueError:
+            username = username.strip()
+            tagline = tagline.strip()
+            
+            # Ưu tiên dùng tracker.gg (dữ liệu thật)
+            tracker_data = await self._get_tracker_gg_data(username, tagline, region)
+            if tracker_data and tracker_data.get('success'):
+                return tracker_data
+            
+            # Fallback: Dùng op.gg
+            opgg_data = await self._get_opgg_data(username, tagline, region)
+            if opgg_data and opgg_data.get('success'):
+                return opgg_data
+            
             return {
                 'success': False,
-                'error': 'Sai format! Dùng: Username#Tagline'
+                'error': 'Không tìm thấy tài khoản. Kiểm tra lại Riot ID và region.'
             }
-        
-        # Loại bỏ khoảng trắng
-        username = username.strip()
-        tagline = tagline.strip()
-        
-        if not username or not tagline:
+            
+        except Exception as e:
+            print(f"Lỗi verify_riot_id: {e}")
             return {
                 'success': False,
-                'error': 'Username và Tagline không được để trống'
+                'error': f'Lỗi kết nối: {str(e)[:100]}'
             }
-        
-        # Nếu có Riot API key, dùng API chính thức
-        if self.has_api_key:
-            result = await self._verify_with_riot_api(username, tagline, region)
-            if result['success']:
-                return result
-        
-        # Fallback: Dùng phương pháp khác
-        return await self._verify_with_fallback(username, tagline, region)
     
-    async def _verify_with_riot_api(self, username, tagline, region):
-        """Xác thực bằng Riot API chính thức"""
+    async def _get_tracker_gg_data(self, username, tagline, region):
+        """Lấy dữ liệu THẬT từ tracker.gg"""
         try:
-            endpoint = self.get_region_endpoint(region)
-            url = f"{endpoint}/riot/account/v1/accounts/by-riot-id/{username}/{tagline}"
+            # API tracker.gg cho TFT
+            url = f"https://api.tracker.gg/api/v2/tft/standard/profile/riot/{quote(username)}%23{tagline}"
             
             session = await self.get_session()
             headers = {
-                "X-Riot-Token": self.api_key,
-                "User-Agent": "TFT-Tracker-Bot/1.0"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Origin": "https://tracker.gg",
+                "Referer": "https://tracker.gg/",
+                "sec-ch-ua": '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site"
             }
             
             async with session.get(url, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     
-                    return {
-                        'success': True,
-                        'data': {
-                            'puuid': data['puuid'],
-                            'game_name': data['gameName'],
-                            'tagline': data['tagLine'],
-                            'verified': True,
-                            'source': 'riot_api',
-                            'verified_at': datetime.now().isoformat()
+                    # Parse dữ liệu từ tracker.gg
+                    account_info = self._parse_tracker_gg_response(data, username, tagline)
+                    
+                    if account_info:
+                        return {
+                            'success': True,
+                            'data': account_info,
+                            'source': 'tracker.gg'
                         }
-                    }
                 elif response.status == 404:
                     return {
                         'success': False,
-                        'error': 'Không tìm thấy tài khoản với Riot ID này'
-                    }
-                elif response.status == 403:
-                    return {
-                        'success': False,
-                        'error': 'Riot API key không hợp lệ hoặc đã hết hạn'
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': f'Lỗi API: {response.status}'
+                        'error': 'Không tìm thấy tài khoản trên tracker.gg'
                     }
                     
         except asyncio.TimeoutError:
-            return {
-                'success': False,
-                'error': 'Timeout khi kết nối đến Riot API'
-            }
+            print(f"Timeout khi lấy dữ liệu từ tracker.gg cho {username}#{tagline}")
         except Exception as e:
-            print(f"Riot API error: {e}")
-            return {
-                'success': False,
-                'error': f'Lỗi kết nối: {str(e)}'
-            }
-    
-    async def _verify_with_fallback(self, username, tagline, region):
-        """Xác thực bằng phương pháp fallback (không cần API key)"""
-        try:
-            # Thử lấy từ tracker.gg
-            tracker_data = await self._get_from_tracker(username, tagline, region)
-            if tracker_data:
-                return {
-                    'success': True,
-                    'data': {
-                        'game_name': tracker_data.get('game_name', username),
-                        'tagline': tracker_data.get('tagline', tagline),
-                        'verified': False,  # Chưa xác thực hoàn toàn
-                        'source': 'tracker_gg',
-                        'verified_at': datetime.now().isoformat(),
-                        'tft_rank': tracker_data.get('tft_rank', 'Unknown')
-                    }
-                }
-            
-            # Thử lấy từ op.gg
-            opgg_data = await self._get_from_opgg(username, tagline, region)
-            if opgg_data:
-                return {
-                    'success': True,
-                    'data': {
-                        'game_name': opgg_data.get('game_name', username),
-                        'tagline': opgg_data.get('tagline', tagline),
-                        'verified': False,
-                        'source': 'op_gg',
-                        'verified_at': datetime.now().isoformat(),
-                        'tft_rank': opgg_data.get('tft_rank', 'Unknown')
-                    }
-                }
-            
-            # Nếu không tìm thấy ở đâu cả
-            return {
-                'success': False,
-                'error': 'Không thể tìm thấy tài khoản. Kiểm tra lại Riot ID và region.'
-            }
-            
-        except Exception as e:
-            print(f"Fallback verification error: {e}")
-            return {
-                'success': False,
-                'error': f'Lỗi khi xác thực: {str(e)}'
-            }
-    
-    async def _get_from_tracker(self, username, tagline, region):
-        """Lấy thông tin từ tracker.gg"""
-        try:
-            import urllib.parse
-            encoded_username = urllib.parse.quote(username)
-            
-            # Tạo URL cho tracker.gg
-            url = f"https://tracker.gg/tft/profile/riot/{encoded_username}%23{tagline}/overview"
-            
-            session = await self.get_session()
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            async with session.get(url, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    
-                    # Parse đơn giản (trong thực tế cần BeautifulSoup)
-                    # Đây chỉ là mock data
-                    return {
-                        'game_name': username,
-                        'tagline': tagline,
-                        'tft_rank': 'Gold III',  # Mock
-                        'source': 'tracker_gg'
-                    }
-                    
-            return None
-        except:
-            return None
-    
-    async def _get_from_opgg(self, username, tagline, region):
-        """Lấy thông tin từ op.gg"""
-        try:
-            # URL cho TFT trên OP.GG
-            url = f"https://www.op.gg/summoners/{region}/{username}-{tagline}"
-            
-            session = await self.get_session()
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            async with session.get(url, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    # Parse HTML để lấy rank
-                    # Đây là mock data
-                    return {
-                        'game_name': username,
-                        'tagline': tagline,
-                        'tft_rank': 'Silver I',  # Mock
-                        'source': 'op_gg'
-                    }
-                    
-            return None
-        except:
-            return None
-    
-    async def get_tft_rank(self, puuid, region):
-        """Lấy rank TFT hiện tại (cần Riot API key)"""
-        if not self.has_api_key:
-            return None
+            print(f"Lỗi tracker.gg API: {e}")
         
+        return None
+    
+    def _parse_tracker_gg_response(self, data, username, tagline):
+        """Parse dữ liệu từ tracker.gg response"""
         try:
-            endpoint = self.get_region_endpoint(region)
-            url = f"{endpoint}/tft/league/v1/entries/by-puuid/{puuid}"
+            # Lấy thông tin cơ bản
+            platform_info = data.get('data', {}).get('platformInfo', {})
+            segments = data.get('data', {}).get('segments', [])
+            
+            # Tìm segment "overview" cho TFT
+            tft_segment = None
+            for segment in segments:
+                if segment.get('type') == 'overview':
+                    tft_segment = segment
+                    break
+            
+            if not tft_segment:
+                return None
+            
+            stats = tft_segment.get('stats', {})
+            
+            # Lấy rank TFT
+            rank_stat = stats.get('rank', {})
+            tier_stat = stats.get('tier', {})
+            
+            rank_display = rank_stat.get('displayValue', 'Unranked')
+            tier_display = tier_stat.get('displayValue', '')
+            
+            # Ưu tiên tier nếu có
+            rank_text = tier_display if tier_display else rank_display
+            
+            # Lấy LP
+            rating_stat = stats.get('rating', {})
+            lp = rating_stat.get('value', 0)
+            
+            # Lấy win/loss
+            wins = stats.get('wins', {}).get('value', 0)
+            losses = stats.get('losses', {}).get('value', 0)
+            total_games = wins + losses
+            
+            # Lấy top percentage
+            top_placement = stats.get('topPlacement', {})
+            top_percentage = top_placement.get('percentile', 0)
+            
+            # Lấy level
+            level_stat = stats.get('level', {})
+            level = level_stat.get('value', 0)
+            
+            return {
+                'game_name': platform_info.get('platformUserHandle', username),
+                'tagline': platform_info.get('platformUserIdentifier', tagline).split('#')[-1],
+                'verified': True,
+                'source': 'tracker.gg',
+                'verified_at': datetime.now().isoformat(),
+                'tft_info': {
+                    'rank': rank_text,
+                    'lp': lp,
+                    'wins': wins,
+                    'losses': losses,
+                    'total_games': total_games,
+                    'win_rate': (wins / total_games * 100) if total_games > 0 else 0,
+                    'top_percentage': top_percentage,
+                    'level': level,
+                    'last_updated': datetime.now().isoformat()
+                }
+            }
+            
+        except Exception as e:
+            print(f"Lỗi parse tracker.gg response: {e}")
+            return None
+    
+    async def _get_opgg_data(self, username, tagline, region):
+        """Lấy dữ liệu từ op.gg (fallback)"""
+        try:
+            # Chuyển region code cho op.gg
+            region_map = {
+                'vn': 'vn',
+                'na': 'na',
+                'euw': 'euw',
+                'eune': 'eune',
+                'kr': 'kr',
+                'jp': 'jp'
+            }
+            
+            opgg_region = region_map.get(region.lower(), 'vn')
+            
+            # URL op.gg cho TFT
+            url = f"https://op.gg/api/v1.0/internal/bypass/summoners/{opgg_region}/{username}-{tagline}/tft/summary"
             
             session = await self.get_session()
-            headers = {"X-Riot-Token": self.api_key}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "vi-VN,vi;q=0.9"
+            }
             
             async with session.get(url, headers=headers, timeout=10) as response:
                 if response.status == 200:
-                    entries = await response.json()
+                    data = await response.json()
                     
-                    for entry in entries:
-                        if entry['queueType'] == 'RANKED_TFT':
-                            return {
-                                'tier': entry['tier'],
-                                'rank': entry['rank'],
-                                'lp': entry['leaguePoints'],
-                                'wins': entry['wins'],
-                                'losses': entry['losses']
-                            }
+                    # Parse dữ liệu từ op.gg
+                    account_info = self._parse_opgg_response(data, username, tagline)
                     
-                    return None
-                else:
-                    return None
-                    
-        except:
+                    if account_info:
+                        return {
+                            'success': True,
+                            'data': account_info,
+                            'source': 'op.gg'
+                        }
+                        
+        except Exception as e:
+            print(f"Lỗi op.gg API: {e}")
+        
+        return None
+    
+    def _parse_opgg_response(self, data, username, tagline):
+        """Parse dữ liệu từ op.gg response"""
+        try:
+            # Lấy thông tin rank TFT từ op.gg
+            tft_info = data.get('tft_info', {})
+            rank_info = tft_info.get('rank_info', {})
+            
+            tier = rank_info.get('tier', 'UNRANKED')
+            division = rank_info.get('division', '')
+            lp = rank_info.get('lp', 0)
+            
+            # Chuyển đổi tier sang tiếng Việt
+            tier_map = {
+                'IRON': 'Sắt',
+                'BRONZE': 'Đồng',
+                'SILVER': 'Bạc',
+                'GOLD': 'Vàng',
+                'PLATINUM': 'Bạch Kim',
+                'DIAMOND': 'Kim Cương',
+                'MASTER': 'Cao Thủ',
+                'GRANDMASTER': 'Đại Cao Thủ',
+                'CHALLENGER': 'Thách Đấu'
+            }
+            
+            tier_vn = tier_map.get(tier, tier)
+            
+            # Tạo rank text
+            if tier == 'UNRANKED':
+                rank_text = 'Chưa xếp hạng'
+            else:
+                rank_text = f"{tier_vn} {division}"
+            
+            # Lấy thông tin tổng quan
+            summary = data.get('summary', {})
+            wins = summary.get('win', 0)
+            losses = summary.get('lose', 0)
+            total_games = wins + losses
+            
+            return {
+                'game_name': username,
+                'tagline': tagline,
+                'verified': True,
+                'source': 'op.gg',
+                'verified_at': datetime.now().isoformat(),
+                'tft_info': {
+                    'rank': rank_text,
+                    'lp': lp,
+                    'wins': wins,
+                    'losses': losses,
+                    'total_games': total_games,
+                    'win_rate': (wins / total_games * 100) if total_games > 0 else 0,
+                    'level': data.get('level', 0),
+                    'last_updated': datetime.now().isoformat()
+                }
+            }
+            
+        except Exception as e:
+            print(f"Lỗi parse op.gg response: {e}")
             return None
+    
+    async def get_tft_stats_live(self, riot_id, region='vn'):
+        """Lấy thống kê TFT live từ tracker.gg"""
+        try:
+            username, tagline = riot_id.split('#', 1)
+            
+            # Gọi tracker.gg API
+            url = f"https://api.tracker.gg/api/v2/tft/standard/profile/riot/{quote(username)}%23{tagline}"
+            
+            session = await self.get_session()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json"
+            }
+            
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    # Parse match history
+                    matches = self._parse_match_history(data)
+                    
+                    return {
+                        'success': True,
+                        'matches': matches[:5],  # Lấy 5 match gần nhất
+                        'total_matches': len(matches)
+                    }
+                    
+        except Exception as e:
+            print(f"Lỗi get_tft_stats_live: {e}")
+        
+        return {'success': False, 'matches': [], 'total_matches': 0}
+    
+    def _parse_match_history(self, data):
+        """Parse lịch sử match từ tracker.gg"""
+        try:
+            segments = data.get('data', {}).get('segments', [])
+            matches = []
+            
+            for segment in segments:
+                if segment.get('type') == 'match':
+                    stats = segment.get('stats', {})
+                    
+                    placement = stats.get('placement', {}).get('value', 8)
+                    game_length = stats.get('gameLength', {}).get('value', 0)
+                    queue_id = stats.get('queueId', {}).get('value', 0)
+                    
+                    # Lấy thời gian match
+                    metadata = segment.get('metadata', {})
+                    timestamp = metadata.get('timestamp', None)
+                    
+                    if timestamp:
+                        match_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    else:
+                        match_time = datetime.now()
+                    
+                    # Lấy traits (nếu có)
+                    traits = []
+                    for key, stat in stats.items():
+                        if key.startswith('trait_') and stat.get('value', 0) > 0:
+                            trait_name = key.replace('trait_', '').replace('_', ' ').title()
+                            trait_tier = min(int(stat.get('value', 0)), 3)
+                            traits.append({
+                                'name': trait_name,
+                                'tier': trait_tier
+                            })
+                    
+                    matches.append({
+                        'placement': placement,
+                        'game_length': game_length,
+                        'queue_id': queue_id,
+                        'timestamp': match_time.isoformat(),
+                        'traits': traits[:8],  # Giới hạn 8 traits
+                        'match_id': f"tracker_{int(match_time.timestamp())}"
+                    })
+            
+            # Sắp xếp theo thời gian mới nhất
+            matches.sort(key=lambda x: x['timestamp'], reverse=True)
+            return matches
+            
+        except Exception as e:
+            print(f"Lỗi parse_match_history: {e}")
+            return []
